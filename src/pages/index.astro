@@ -1,16 +1,315 @@
 ---
-
+import Layout from "../layouts/Layout.astro";
 ---
 
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
-	</head>
-	<body>
-		<h1>Astro</h1>
-	</body>
-</html>
+<Layout title="AI HTML Generator">
+  <div class="container">
+    <div class="left">
+      <div id="chat"></div>
+      <div id="input-message">
+        <textarea
+          id="user-message"
+          name="user-message"
+          placeholder=""
+          id="Generemos una página web!"
+          rows="3"></textarea>
+        <button id="btn-send">Enviar</button>
+      </div>
+    </div>
+    <div class="resizer" id="dragMe"></div>
+    <div class="right">
+      <iframe id="preview"></iframe>
+    </div>
+  </div>
+</Layout>
+<script>
+  const resizer = document.getElementById("dragMe") as HTMLDivElement;
+  const leftSide = resizer.previousElementSibling as HTMLElement;
+  const rightSide = resizer.nextElementSibling;
+  const btnSend = document.getElementById("btn-send") as HTMLButtonElement;
+  const chat = document.getElementById("chat") as HTMLElement;
+
+  const history: Content[] = [];
+
+  interface Content {
+    role: "user" | "model";
+    parts: { text: string }[];
+  }
+
+  function updateChat(content?: Content) {
+    console.log(content);
+    const chatMessage = document.createElement("div");
+    chatMessage.classList.add("chat-messages");
+    if (content?.role === "user") {
+      chatMessage.dataset.role = "user";
+      let paragraph = document.createElement("p");
+      paragraph.textContent = content.parts[0].text;
+      chatMessage.appendChild(paragraph);
+      chat.appendChild(chatMessage);
+    }
+    if (
+      content?.role === "model" &&
+      (chat.lastElementChild as HTMLDivElement)?.dataset.role === "model"
+    ) {
+      let lastMessage = chat.lastElementChild as HTMLDivElement;
+      lastMessage.children[0].textContent = content.parts[0].text;
+    } else if (content?.role === "model") {
+      chatMessage.dataset.role = "model";
+      let paragraph = document.createElement("p") as HTMLParagraphElement;
+      paragraph.textContent = content?.parts[0].text || "";
+      chatMessage.appendChild(paragraph);
+      chat.appendChild(chatMessage);
+    }
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function updatePreview(content: any) {
+    //console.log(content);
+    //console.log(content);
+    const parser = new DOMParser();
+    if (content.b_html) {
+      const parseHtml = parser.parseFromString(content.b_html, "text/html");
+      //const css = parser.parseFromString(content.c_css, "text/html");
+      //const js = parser.parseFromString(content.d_js, "text/html");
+      const preview = document.getElementById("preview") as HTMLIFrameElement;
+      preview.sandbox.add("allow-same-origin");
+      preview.sandbox.add("allow-scripts");
+      let html = `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <style>
+          ${content.c_css}
+          </style>
+        </head>
+        <body>
+          ${parseHtml.body.innerHTML}
+          <script>
+          ${content.d_js}
+          <\/script>
+        </body>
+        </html>
+      `;
+      preview.src = URL.createObjectURL(
+        new Blob([html], { type: "text/html" })
+      );
+      //preview.setAttribute("srcdoc", html);
+
+      //preview.srcdoc = content.b_html;
+      //console.log(html.documentElement.innerHTML);
+      //let iframe = preview.contentWindow?.document;
+      //iframe?.open();
+      //console.log(iframe?.scripts[0].innerHTML);
+    }
+
+    let message: Content = {
+      role: "model",
+      parts: [
+        { text: (content.a_message as string) || "" },
+        { text: (content.b_html as string) || "" },
+        { text: (content.c_css as string) || "" },
+        { text: (content.d_js as string) || "" },
+      ],
+    };
+
+    if (history[history.length - 1]?.role === "model") {
+      history[history.length - 1] = message;
+    } else {
+      history.push(message);
+    }
+
+    updateChat(message);
+  }
+
+  async function fetchAiResponse(message: string) {
+    const res = await fetch("/api/generate", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        history: history,
+      }),
+    });
+    const reader = res.body?.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      if (!reader) {
+        break;
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\n/g, "");
+      try {
+        //console.log(buffer);
+        if (buffer.endsWith('"} ')) {
+          const content = JSON.parse(buffer);
+          //console.log(content);
+          updatePreview(content);
+        } else {
+          const content = JSON.parse(buffer + '"}');
+          updatePreview(content);
+        }
+      } catch (err) {
+        //console.error(err);
+      }
+    }
+  }
+
+  //fetchAiResponse();
+  chat.scrollTop = chat.scrollHeight;
+
+  btnSend.addEventListener("click", async () => {
+    const message = document.getElementById(
+      "user-message"
+    ) as HTMLTextAreaElement;
+    let content: Content = {
+      role: "user",
+      parts: [{ text: message.value }],
+    };
+    history.push(content);
+    updateChat(content);
+    btnSend.disabled = true;
+    message.value = "";
+
+    await fetchAiResponse(content.parts[0].text).finally(() => {
+      btnSend.disabled = false;
+    });
+  });
+
+  let isResizing = false;
+  let startX: number;
+  let startLeftWidth: number;
+
+  const mouseDownHandler = function (e: MouseEvent) {
+    isResizing = true;
+    startX = e.clientX;
+    if (!leftSide) return;
+    startLeftWidth = leftSide.getBoundingClientRect().width;
+
+    document.addEventListener("mousemove", mouseMoveHandler);
+    document.addEventListener("mouseup", mouseUpHandler);
+  };
+
+  const mouseMoveHandler = function (e: MouseEvent) {
+    if (!isResizing) return;
+
+    const dx = e.clientX - startX;
+    const newLeftWidth = startLeftWidth + dx;
+    const containerWidth = (
+      resizer.parentNode as HTMLElement
+    )?.getBoundingClientRect().width;
+
+    if (
+      newLeftWidth > 0 &&
+      newLeftWidth < containerWidth - resizer.offsetWidth
+    ) {
+      leftSide.style.width = `${newLeftWidth}px`;
+    }
+  };
+  const mouseUpHandler = function () {
+    isResizing = false;
+    document.removeEventListener("mousemove", mouseMoveHandler);
+    document.removeEventListener("mouseup", mouseUpHandler);
+  };
+
+  resizer.addEventListener("mousedown", mouseDownHandler);
+</script>
+<style is:inline>
+  iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+  }
+  .container {
+    display: flex;
+    height: 100%;
+  }
+  .left,
+  .right {
+    height: 100%;
+  }
+  .left {
+    background-color: #f0f0f0;
+    width: 50%;
+    display: flex;
+    flex-direction: column;
+    justify-content: end;
+    padding: 3rem;
+    gap: 1rem;
+  }
+  .right {
+    background-color: #e0e0e0;
+    overflow: hidden;
+    padding: 1rem;
+    flex: 1;
+  }
+  .resizer {
+    width: 10px;
+    background-color: #ccc;
+    cursor: col-resize;
+  }
+
+  #input-message {
+    display: flex;
+    padding: 1rem;
+    border: 1px solid #ccc;
+    border-radius: 0.5rem;
+  }
+
+  #input-message textarea {
+    flex: 1;
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    resize: none;
+  }
+  #input-message button {
+    padding: 0.5rem 1rem;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    margin-left: 1rem;
+    background-color: #f0f0f0;
+    cursor: pointer;
+    &:hover {
+      background-color: #e0e0e0;
+    }
+  }
+
+  #chat {
+    display: flex;
+    flex-direction: column;
+    height: fit-content;
+    justify-content: start;
+    padding: 0 0.2rem;
+    gap: 1rem;
+    overflow-y: scroll;
+    scroll-behavior: smooth;
+    scrollbar-width: thin;
+    scrollbar-color: #ccc #f0f0f0;
+  }
+  .chat-messages {
+    border: 1px solid #ccc;
+    height: fit-content;
+    min-height: fit-content !important;
+    padding: 0.2rem 1rem;
+  }
+
+  .chat-messages[data-role="user"] {
+    align-self: flex-end;
+    border-radius: 0.5rem 2rem 0 2rem;
+    background: lightskyblue;
+  }
+
+  .chat-messages[data-role="model"] {
+    align-self: flex-start;
+    border-radius: 0rem 2rem 0.5rem 2rem;
+    background: lightgreen;
+  }
+</style>
